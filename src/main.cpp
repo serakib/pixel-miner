@@ -39,6 +39,11 @@ static double rd(double a,double b){return std::uniform_real_distribution<double
 static double elapsed(){return std::max(0.0,emscripten_get_now()/1000.0-runStartTime);}
 static int stageFor(double t){return std::min(MAX_STAGE,1+static_cast<int>(t/STAGE_LENGTH_SECONDS));}
 
+extern "C" EMSCRIPTEN_KEEPALIVE void move_player(int dx,int dy);
+extern "C" EMSCRIPTEN_KEEPALIVE void toggle_pause();
+extern "C" EMSCRIPTEN_KEEPALIVE void restart_game();
+extern "C" EMSCRIPTEN_KEEPALIVE void js_key(int k);
+
 EM_JS(void, js_setup, (), {
     const c=document.getElementById("gameCanvas");
     if(!c)return;
@@ -92,11 +97,14 @@ EM_JS(void, js_game_over,(const char* reason,int score),{
     document.getElementById("gameOverScore").textContent=score;
     o.classList.add("visible");
 });
+
 EM_JS(void, js_hide_game_over, (), {
     const e=document.getElementById("gameOverOverlay");if(e)e.classList.remove("visible");
 });
 
 static void revealAround();
+static void mine(int x,int y);
+static void over(const char* r);
 
 static void hud(){js_update_hud(player.hp,player.energy,player.score,player.copper,player.crystals,player.depth,currentStage,elapsed());}
 static void over(const char* r){if(gameOver)return;gameOver=true;js_game_over(r,player.score);}
@@ -185,7 +193,6 @@ static void render(){
 }
 
 extern "C" EMSCRIPTEN_KEEPALIVE void js_key(int k){if(k=='w')move(0,-1);else if(k=='s')move(0,1);else if(k=='a')move(-1,0);else if(k=='d')move(1,0);else if(k=='p')toggle_pause();}
-
 extern "C" EMSCRIPTEN_KEEPALIVE void move_player(int dx,int dy){move(dx,dy);}
 extern "C" EMSCRIPTEN_KEEPALIVE void toggle_pause(){if(!gameOver){paused=!paused;js_message(paused?"PAUSED":"RESUMED");}}
 
