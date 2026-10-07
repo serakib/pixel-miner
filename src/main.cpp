@@ -1,15 +1,17 @@
-#include <emscripten.h>
-#include <emscripten/html5.h>
-
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <cstdlib>
 #include <ctime>
 #include <random>
 #include <string>
 #include <vector>
 
-using namespace std;
+#include <emscripten.h>
+#include <emscripten/html5.h>
+
+using std::max;
+using std::min;
 
 // ============================================================
 // CONFIG
@@ -17,599 +19,374 @@ using namespace std;
 
 static constexpr int MAP_W = 48;
 static constexpr int MAP_H = 34;
-static constexpr int TILE  = 24;
+static constexpr int TILE = 24;
 
+static constexpr int START_HP = 100;
 static constexpr int START_ENERGY = 100;
-static constexpr int MAX_BUGS = 8;
+
+static constexpr int MAX_STAGE = 5;
+static constexpr double STAGE_LENGTH_SECONDS = 60.0;
+
+static constexpr int MAX_BUGS = 12;
+
+static constexpr int TILE_DIRT = 0;
+static constexpr int TILE_ROCK = 1;
+static constexpr int TILE_COPPER = 2;
+static constexpr int TILE_CRYSTAL = 3;
+static constexpr int TILE_ENERGY = 4;
+static constexpr int TILE_EXIT = 5;
+static constexpr int TILE_HAZARD = 6;
 
 // ============================================================
-// DATA TYPES
-// ============================================================
-
-struct Tile {
-    int type;
-    int revealed;
-};
-
-struct Player {
-    int x;
-    int y;
-    int energy;
-    int score;
-};
-
-struct Bug {
-    double x;
-    double y;
-    double speed;
-};
-
-// Tile types
-// 0 = dirt
-// 1 = rock
-// 2 = copper
-// 3 = crystal
-// 4 = energy
-
-static vector<Tile> world;
-static vector<Bug> bugs;
-
-static Player player{MAP_W / 2, MAP_H / 2, START_ENERGY, 0};
-
-static int bestScore = 0;
-static bool gameOver = false;
-
-static double lastMoveTime = 0.0;
-static double lastBugSpawn = 0.0;
-
-static mt19937 rng(
-    static_cast<unsigned int>(time(nullptr))
-);
-
-// ============================================================
-// BASIC RANDOM HELPERS
-// ============================================================
-
-static int randomInt(int minValue, int maxValue) {
-    uniform_int_distribution<int> dist(minValue, maxValue);
-    return dist(rng);
-}
-
-static double randomDouble(double minValue, double maxValue) {
-    uniform_real_distribution<double> dist(minValue, maxValue);
-    return dist(rng);
-}
-
-// ============================================================
-// JAVASCRIPT BRIDGE
+// EM_JS HELPERS
 // ============================================================
 
 EM_JS(void, js_setup, (), {
-    window.pm = window.pm || {};
-
-    const canvas =
-        document.getElementById("gameCanvas") ||
-        document.querySelector("canvas");
+    const canvas = document.getElementById("gameCanvas");
 
     if (!canvas) {
-        console.error("Pixel Miner: canvas not found.");
+        console.error("gameCanvas not found");
         return;
     }
 
-    window.pm.canvas = canvas;
-    window.pm.ctx = canvas.getContext("2d");
+    window.pixelMiner = window.pixelMiner || {};
 
-    window.pm.keys = {};
-    window.pm.mouseDown = false;
-    window.pm.mouseX = 0;
-    window.pm.mouseY = 0;
+    function sendKey(key) {
+        if (typeof Module !== "undefined" && Module._js_key) {
+            Module._js_key(key.charCodeAt(0));
+        }
+    }
 
-    window.pm.canvas.addEventListener("keydown", function(e) {
-        window.pm.keys[e.key] = true;
+    document.addEventListener("keydown", function (e) {
+        let key = "";
 
-        if (
-            e.key === "ArrowUp" ||
-            e.key === "ArrowDown" ||
-            e.key === "ArrowLeft" ||
-            e.key === "ArrowRight" ||
-            e.key === " "
-        ) {
+        if (e.key === "ArrowUp") key = "w";
+        else if (e.key === "ArrowDown") key = "s";
+        else if (e.key === "ArrowLeft") key = "a";
+        else if (e.key === "ArrowRight") key = "d";
+        else if (e.key === "w" || e.key === "W") key = "w";
+        else if (e.key === "s" || e.key === "S") key = "s";
+        else if (e.key === "a" || e.key === "A") key = "a";
+        else if (e.key === "d" || e.key === "D") key = "d";
+        else if (e.key === "p" || e.key === "P") key = "p";
+
+        if (key) {
             e.preventDefault();
+            sendKey(key);
         }
     });
 
-    window.pm.canvas.addEventListener("keyup", function(e) {
-        window.pm.keys[e.key] = false;
+    canvas.addEventListener("click", function (e) {
+        if (
+            typeof Module === "undefined" ||
+            !Module._move_player
+        ) {
+            return;
+        }
+
+        const rect = canvas.getBoundingClientRect();
+
+        const x = e.clientX - rect.left;
+        const y = e.clientY - rect.top;
+
+        const cx = rect.width / 2;
+        const cy = rect.height / 2;
+
+        const dx = x - cx;
+        const dy = y - cy;
+
+        if (Math.abs(dx) < 12 && Math.abs(dy) < 12) {
+            return;
+        }
+
+        if (Math.abs(dx) > Math.abs(dy)) {
+            Module._move_player(dx > 0 ? 1 : -1, 0);
+        } else {
+            Module._move_player(0, dy > 0 ? 1 : -1);
+        }
     });
 
-    window.pm.canvas.addEventListener("mousedown", function(e) {
-        window.pm.mouseDown = true;
+    let touchStartX = 0;
+    let touchStartY = 0;
 
-        const rect = window.pm.canvas.getBoundingClientRect();
+    canvas.addEventListener("touchstart", function (e) {
+        if (!e.touches.length) return;
 
-        window.pm.mouseX =
-            (e.clientX - rect.left) *
-            (window.pm.canvas.width / rect.width);
+        touchStartX = e.touches[0].clientX;
+        touchStartY = e.touches[0].clientY;
+    }, { passive: true });
 
-        window.pm.mouseY =
-            (e.clientY - rect.top) *
-            (window.pm.canvas.height / rect.height);
-    });
+    canvas.addEventListener("touchend", function (e) {
+        if (!e.changedTouches.length) return;
 
-    window.pm.canvas.addEventListener("mousemove", function(e) {
-        const rect = window.pm.canvas.getBoundingClientRect();
+        const touch = e.changedTouches[0];
 
-        window.pm.mouseX =
-            (e.clientX - rect.left) *
-            (window.pm.canvas.width / rect.width);
+        const dx = touch.clientX - touchStartX;
+        const dy = touch.clientY - touchStartY;
 
-        window.pm.mouseY =
-            (e.clientY - rect.top) *
-            (window.pm.canvas.height / rect.height);
-    });
+        if (Math.abs(dx) < 18 && Math.abs(dy) < 18) {
+            return;
+        }
 
-    window.pm.canvas.addEventListener("mouseup", function() {
-        window.pm.mouseDown = false;
-    });
+        if (
+            typeof Module === "undefined" ||
+            !Module._move_player
+        ) {
+            return;
+        }
 
-    window.pm.canvas.addEventListener("mouseleave", function() {
-        window.pm.mouseDown = false;
-    });
+        if (Math.abs(dx) > Math.abs(dy)) {
+            Module._move_player(dx > 0 ? 1 : -1, 0);
+        } else {
+            Module._move_player(0, dy > 0 ? 1 : -1);
+        }
+    }, { passive: true });
 
-    window.pm.canvas.addEventListener(
-        "touchstart",
-        function(e) {
-            const touch = e.touches[0];
+    window.pixelMiner.restart = function () {
+        if (
+            typeof Module !== "undefined" &&
+            Module._restart_game
+        ) {
+            Module._restart_game();
+        } else {
+            window.location.reload();
+        }
+    };
 
-            if (!touch) return;
-
-            const rect =
-                window.pm.canvas.getBoundingClientRect();
-
-            window.pm.mouseX =
-                (touch.clientX - rect.left) *
-                (window.pm.canvas.width / rect.width);
-
-            window.pm.mouseY =
-                (touch.clientY - rect.top) *
-                (window.pm.canvas.height / rect.height);
-
-            window.pm.mouseDown = true;
-
-            e.preventDefault();
-        },
-        { passive: false }
-    );
-
-    window.pm.canvas.addEventListener(
-        "touchend",
-        function(e) {
-            window.pm.mouseDown = false;
-            e.preventDefault();
-        },
-        { passive: false }
-    );
-
-    window.pm.canvas.addEventListener(
-        "touchmove",
-        function(e) {
-            const touch = e.touches[0];
-
-            if (!touch) return;
-
-            const rect =
-                window.pm.canvas.getBoundingClientRect();
-
-            window.pm.mouseX =
-                (touch.clientX - rect.left) *
-                (window.pm.canvas.width / rect.width);
-
-            window.pm.mouseY =
-                (touch.clientY - rect.top) *
-                (window.pm.canvas.height / rect.height);
-
-            e.preventDefault();
-        },
-        { passive: false }
-    );
-
-    window.pm.canvas.setAttribute("tabindex", "0");
-    window.pm.canvas.focus();
+    window.pixelMiner.pause = function () {
+        if (
+            typeof Module !== "undefined" &&
+            Module._toggle_pause
+        ) {
+            Module._toggle_pause();
+        }
+    };
 });
 
-EM_JS(int, js_key, (int key), {
-    if (!window.pm || !window.pm.keys) return 0;
+EM_JS(void, js_update_hud,
+      (int hp,
+       int energy,
+       int score,
+       int copper,
+       int crystals,
+       int depth,
+       int stage,
+       double elapsed),
+{
+    function setText(id, value) {
+        const el = document.getElementById(id);
+        if (el) el.textContent = value;
+    }
 
-    if (key === 0) return window.pm.keys["ArrowUp"] ? 1 : 0;
-    if (key === 1) return window.pm.keys["ArrowDown"] ? 1 : 0;
-    if (key === 2) return window.pm.keys["ArrowLeft"] ? 1 : 0;
-    if (key === 3) return window.pm.keys["ArrowRight"] ? 1 : 0;
-    if (key === 4) return window.pm.keys["w"] ? 1 : 0;
-    if (key === 5) return window.pm.keys["s"] ? 1 : 0;
-    if (key === 6) return window.pm.keys["a"] ? 1 : 0;
-    if (key === 7) return window.pm.keys["d"] ? 1 : 0;
+    setText("hpValue", hp);
+    setText("energyValue", energy);
+    setText("scoreValue", score);
+    setText("copperValue", copper);
+    setText("crystalValue", crystals);
+    setText("depthValue", depth);
+    setText("stageValue", stage);
 
-    return 0;
+    const timer = document.getElementById("timeValue");
+
+    if (timer) {
+        const total = Math.max(0, Math.floor(elapsed));
+
+        const minutes = Math.floor(total / 60);
+        const seconds = total % 60;
+
+        timer.textContent =
+            String(minutes).padStart(2, "0") +
+            ":" +
+            String(seconds).padStart(2, "0");
+    }
+
+    const hpBar = document.getElementById("hpBar");
+    const energyBar = document.getElementById("energyBar");
+
+    if (hpBar) {
+        hpBar.style.width = Math.max(0, Math.min(100, hp)) + "%";
+    }
+
+    if (energyBar) {
+        energyBar.style.width =
+            Math.max(0, Math.min(100, energy)) + "%";
+    }
 });
 
-EM_JS(int, js_mouse_down, (), {
-    return window.pm && window.pm.mouseDown ? 1 : 0;
+EM_JS(void, js_message, (const char* text), {
+    const message = UTF8ToString(text);
+
+    const el = document.getElementById("message");
+
+    if (el) {
+        el.textContent = message;
+
+        el.classList.remove("show");
+
+        void el.offsetWidth;
+
+        el.classList.add("show");
+
+        clearTimeout(window.__pixelMinerMessageTimer);
+
+        window.__pixelMinerMessageTimer =
+            setTimeout(function () {
+                el.classList.remove("show");
+            }, 1800);
+    }
 });
 
-EM_JS(int, js_mouse_x, (), {
-    return window.pm ? window.pm.mouseX : 0;
-});
+EM_JS(void, js_show_game_over, (const char* reason, int score), {
+    let overlay = document.getElementById("gameOverOverlay");
 
-EM_JS(int, js_mouse_y, (), {
-    return window.pm ? window.pm.mouseY : 0;
-});
+    if (!overlay) {
+        overlay = document.createElement("div");
 
-EM_JS(void, js_set_score, (int score, int energy, int best), {
-    const scoreEl = document.getElementById("score");
-    const energyEl = document.getElementById("energy");
-    const bestEl = document.getElementById("bestScore");
+        overlay.id = "gameOverOverlay";
+
+        overlay.innerHTML = `
+            <div class="game-over-card">
+                <div class="game-over-title">GAME OVER</div>
+                <div id="gameOverReason" class="game-over-reason"></div>
+                <div class="game-over-score">
+                    SCORE: <span id="gameOverScore">0</span>
+                </div>
+                <button id="gameOverRestart">RESTART</button>
+            </div>
+        `;
+
+        document.body.appendChild(overlay);
+
+        const button =
+            document.getElementById("gameOverRestart");
+
+        if (button) {
+            button.addEventListener("click", function () {
+                if (
+                    typeof Module !== "undefined" &&
+                    Module._restart_game
+                ) {
+                    Module._restart_game();
+                } else {
+                    window.location.reload();
+                }
+            });
+        }
+    }
+
+    const reasonEl =
+        document.getElementById("gameOverReason");
+
+    const scoreEl =
+        document.getElementById("gameOverScore");
+
+    if (reasonEl) {
+        reasonEl.textContent = UTF8ToString(reason);
+    }
 
     if (scoreEl) {
         scoreEl.textContent = String(score);
     }
 
-    if (energyEl) {
-        energyEl.textContent = String(Math.max(0, energy));
-    }
-
-    if (bestEl) {
-        bestEl.textContent = String(best);
-    }
+    overlay.classList.add("visible");
 });
 
-EM_JS(void, js_game_state, (int state), {
-    const status =
-        document.getElementById("gameStatus") ||
-        document.getElementById("status");
+EM_JS(void, js_hide_game_over, (), {
+    const overlay =
+        document.getElementById("gameOverOverlay");
 
-    if (!status) return;
-
-    if (state === 0) {
-        status.textContent = "MINING";
-    } else {
-        status.textContent = "GAME OVER";
+    if (overlay) {
+        overlay.classList.remove("visible");
     }
 });
 
 EM_JS(void, js_save_best, (int score), {
     try {
-        localStorage.setItem(
-            "pixel_miner_best",
-            String(score)
-        );
+        const oldBest =
+            Number(localStorage.getItem("pixelMinerBest") || 0);
+
+        if (score > oldBest) {
+            localStorage.setItem(
+                "pixelMinerBest",
+                String(score)
+            );
+        }
     } catch (e) {
-        console.warn("Could not save best score.");
+        console.warn("Could not save best score", e);
     }
 });
 
 EM_JS(int, js_load_best, (), {
     try {
-        const value =
-            localStorage.getItem("pixel_miner_best");
-
-        if (!value) return 0;
-
-        const number = parseInt(value, 10);
-
-        if (Number.isNaN(number)) return 0;
-
-        return number;
+        return Number(
+            localStorage.getItem("pixelMinerBest") || 0
+        );
     } catch (e) {
         return 0;
     }
 });
 
-EM_JS(void, js_message, (const char* message), {
-    const text = UTF8ToString(message);
-
-    const messageEl =
-        document.getElementById("message");
-
-    if (messageEl) {
-        messageEl.textContent = text;
-    }
-
-    const status =
-        document.getElementById("gameStatus") ||
-        document.getElementById("status");
-
-    if (status) {
-        status.textContent = text;
-    }
-});
-
 // ============================================================
-// RENDERER
-// IMPORTANT: This is EM_JS, not EM_ASM.
+// DATA
 // ============================================================
 
-EM_JS(
-    void,
-    js_render,
-    (
-        int mapW,
-        int mapH,
-        int tile,
-        int worldPtr,
-        int px,
-        int py,
-        int bugCount,
-        int bugsPtr
-    ),
-    {
-        if (!window.pm || !window.pm.ctx || !window.pm.canvas) {
-            return;
-        }
-
-        const ctx = window.pm.ctx;
-        const canvas = window.pm.canvas;
-
-        ctx.fillStyle = "#061018";
-        ctx.fillRect(
-            0,
-            0,
-            canvas.width,
-            canvas.height
-        );
-
-        const heap = HEAP32;
-        const base = worldPtr >> 2;
-
-        const colors = [
-            "#182733",
-            "#33414b",
-            "#a66b3d",
-            "#9c7cff",
-            "#38e0a2"
-        ];
-
-        // ----------------------------------------------------
-        // WORLD
-        // ----------------------------------------------------
-
-        for (let y = 0; y < mapH; y++) {
-            for (let x = 0; x < mapW; x++) {
-
-                const cell =
-                    y * mapW + x;
-
-                const offset =
-                    base + cell * 2;
-
-                const type =
-                    heap[offset];
-
-                const revealed =
-                    heap[offset + 1];
-
-                const screenX =
-                    x * tile;
-
-                const screenY =
-                    y * tile;
-
-                if (!revealed) {
-
-                    ctx.fillStyle = "#02070c";
-
-                    ctx.fillRect(
-                        screenX,
-                        screenY,
-                        tile - 1,
-                        tile - 1
-                    );
-
-                    continue;
-                }
-
-                ctx.fillStyle =
-                    colors[type] || colors[0];
-
-                ctx.fillRect(
-                    screenX,
-                    screenY,
-                    tile - 1,
-                    tile - 1
-                );
-
-                // Copper
-                if (type === 2) {
-
-                    ctx.fillStyle = "#e9a66a";
-
-                    ctx.fillRect(
-                        screenX + 7,
-                        screenY + 7,
-                        10,
-                        10
-                    );
-                }
-
-                // Crystal
-                if (type === 3) {
-
-                    ctx.fillStyle = "#e0d5ff";
-
-                    ctx.beginPath();
-
-                    ctx.moveTo(
-                        screenX + 12,
-                        screenY + 4
-                    );
-
-                    ctx.lineTo(
-                        screenX + 19,
-                        screenY + 12
-                    );
-
-                    ctx.lineTo(
-                        screenX + 12,
-                        screenY + 20
-                    );
-
-                    ctx.lineTo(
-                        screenX + 5,
-                        screenY + 12
-                    );
-
-                    ctx.closePath();
-
-                    ctx.fill();
-                }
-
-                // Energy
-                if (type === 4) {
-
-                    ctx.fillStyle = "#c7fff0";
-
-                    ctx.beginPath();
-
-                    ctx.arc(
-                        screenX + 12,
-                        screenY + 12,
-                        6,
-                        0,
-                        Math.PI * 2
-                    );
-
-                    ctx.fill();
-                }
-            }
-        }
-
-        // ----------------------------------------------------
-        // CAVE BUGS
-        // ----------------------------------------------------
-
-        if (bugsPtr && bugCount > 0) {
-
-            const bugsHeap =
-                new Float64Array(
-                    HEAPF64.buffer
-                );
-
-            const base64 =
-                bugsPtr >> 3;
-
-            for (
-                let i = 0;
-                i < bugCount;
-                i++
-            ) {
-
-                const bx =
-                    bugsHeap[base64 + i * 3];
-
-                const by =
-                    bugsHeap[
-                        base64 + i * 3 + 1
-                    ];
-
-                const screenX =
-                    bx * tile;
-
-                const screenY =
-                    by * tile;
-
-                ctx.fillStyle = "#ff547d";
-
-                ctx.beginPath();
-
-                ctx.arc(
-                    screenX + 12,
-                    screenY + 12,
-                    8,
-                    0,
-                    Math.PI * 2
-                );
-
-                ctx.fill();
-
-                ctx.fillStyle = "#ffffff";
-
-                ctx.fillRect(
-                    screenX + 8,
-                    screenY + 9,
-                    2,
-                    2
-                );
-
-                ctx.fillRect(
-                    screenX + 14,
-                    screenY + 9,
-                    2,
-                    2
-                );
-            }
-        }
-
-        // ----------------------------------------------------
-        // PLAYER
-        // ----------------------------------------------------
-
-        const playerX =
-            px * tile;
-
-        const playerY =
-            py * tile;
-
-        ctx.fillStyle = "#5ff6ff";
-
-        ctx.beginPath();
-
-        ctx.arc(
-            playerX + 12,
-            playerY + 12,
-            9,
-            0,
-            Math.PI * 2
-        );
-
-        ctx.fill();
-
-        // Player eyes
-        ctx.fillStyle = "#ffffff";
-
-        ctx.beginPath();
-
-        ctx.arc(
-            playerX + 9,
-            playerY + 9,
-            2,
-            0,
-            Math.PI * 2
-        );
-
-        ctx.arc(
-            playerX + 15,
-            playerY + 9,
-            2,
-            0,
-            Math.PI * 2
-        );
-
-        ctx.fill();
-
-        // Player outline
-        ctx.strokeStyle =
-            "rgba(95,246,255,0.2)";
-
-        ctx.strokeRect(
-            playerX + 2,
-            playerY + 2,
-            20,
-            20
-        );
-    }
+struct Player {
+    int x = MAP_W / 2;
+    int y = MAP_H / 2;
+
+    int hp = START_HP;
+    int energy = START_ENERGY;
+
+    int score = 0;
+    int copper = 0;
+    int crystals = 0;
+
+    int depth = 1;
+};
+
+struct Bug {
+    double x = 0.0;
+    double y = 0.0;
+    double speed = 0.5;
+};
+
+// ============================================================
+// GLOBAL STATE
+// ============================================================
+
+static Player player;
+
+static std::vector<int> world(
+    MAP_W * MAP_H,
+    TILE_DIRT
 );
 
+static std::vector<unsigned char> revealed(
+    MAP_W * MAP_H,
+    0
+);
+
+static std::vector<Bug> bugs;
+
+static std::mt19937 rng(
+    static_cast<unsigned int>(
+        std::time(nullptr)
+    )
+);
+
+static bool running = true;
+static bool paused = false;
+static bool gameOver = false;
+
+static int currentStage = 1;
+
+static double runStartTime = 0.0;
+static double lastFrameTime = 0.0;
+static double bugSpawnTimer = 0.0;
+static double stageMessageTimer = 0.0;
+
 // ============================================================
-// WORLD GENERATION
+// UTILS
 // ============================================================
 
 static int indexOf(int x, int y) {
@@ -617,148 +394,529 @@ static int indexOf(int x, int y) {
 }
 
 static bool insideMap(int x, int y) {
-    return (
+    return
         x >= 0 &&
         x < MAP_W &&
         y >= 0 &&
-        y < MAP_H
+        y < MAP_H;
+}
+
+static int randomInt(int minValue, int maxValue) {
+    std::uniform_int_distribution<int> dist(
+        minValue,
+        maxValue
+    );
+
+    return dist(rng);
+}
+
+static double randomDouble(
+    double minValue,
+    double maxValue
+) {
+    std::uniform_real_distribution<double> dist(
+        minValue,
+        maxValue
+    );
+
+    return dist(rng);
+}
+
+static double runElapsed() {
+    const double now =
+        emscripten_get_now() / 1000.0;
+
+    return max(0.0, now - runStartTime);
+}
+
+// ============================================================
+// STAGE / DIFFICULTY
+// ============================================================
+
+static int calculateStage(double elapsed) {
+    const int stage =
+        1 +
+        static_cast<int>(
+            elapsed / STAGE_LENGTH_SECONDS
+        );
+
+    return min(MAX_STAGE, stage);
+}
+
+static int stageHazards() {
+    return min(
+        20,
+        2 + currentStage * 2 + player.depth / 2
     );
 }
 
-static void revealAround(int cx, int cy) {
+static int stageEnergyCells() {
+    return 7 + currentStage * 2;
+}
 
-    for (int dy = -2; dy <= 2; dy++) {
+static double bugSpawnInterval() {
+    const double value =
+        6.0 -
+        currentStage * 0.8 -
+        player.depth * 0.08;
 
-        for (int dx = -2; dx <= 2; dx++) {
+    return max(1.2, value);
+}
 
-            const int x = cx + dx;
-            const int y = cy + dy;
+static double bugSpeedMin() {
+    return
+        0.28 +
+        currentStage * 0.08 +
+        player.depth * 0.015;
+}
 
-            if (!insideMap(x, y)) {
-                continue;
-            }
+static double bugSpeedMax() {
+    return
+        0.55 +
+        currentStage * 0.12 +
+        player.depth * 0.025;
+}
 
-            if (
-                abs(dx) + abs(dy) <= 2
-            ) {
-                world[indexOf(x, y)].revealed = 1;
+static int maximumBugs() {
+    return min(
+        MAX_BUGS,
+        1 +
+        currentStage +
+        player.depth / 2
+    );
+}
+
+// ============================================================
+// GAME OVER
+// ============================================================
+
+static void gameOverNow(
+    const char* reason
+) {
+    if (gameOver) {
+        return;
+    }
+
+    gameOver = true;
+    paused = false;
+
+    js_save_best(player.score);
+
+    js_show_game_over(
+        reason,
+        player.score
+    );
+}
+
+// ============================================================
+// WORLD
+// ============================================================
+
+static void setTile(
+    int x,
+    int y,
+    int type
+) {
+    if (insideMap(x, y)) {
+        world[indexOf(x, y)] = type;
+    }
+}
+
+static int getTile(
+    int x,
+    int y
+) {
+    if (!insideMap(x, y)) {
+        return TILE_ROCK;
+    }
+
+    return world[indexOf(x, y)];
+}
+
+static void clearSpawnArea() {
+    const int radius = 3;
+
+    for (int y = player.y - radius;
+         y <= player.y + radius;
+         ++y) {
+
+        for (int x = player.x - radius;
+             x <= player.x + radius;
+             ++x) {
+
+            if (insideMap(x, y)) {
+                setTile(
+                    x,
+                    y,
+                    TILE_DIRT
+                );
             }
         }
+    }
+}
+
+static bool isFreeForSpecial(
+    int x,
+    int y
+) {
+    if (!insideMap(x, y)) {
+        return false;
+    }
+
+    if (x == player.x &&
+        y == player.y) {
+        return false;
+    }
+
+    if (
+        std::abs(x - player.x) <= 3 &&
+        std::abs(y - player.y) <= 3
+    ) {
+        return false;
+    }
+
+    return getTile(x, y) == TILE_DIRT;
+}
+
+static void placeSpecialTiles(
+    int type,
+    int amount
+) {
+    int placed = 0;
+
+    int attempts = amount * 100;
+
+    while (
+        placed < amount &&
+        attempts-- > 0
+    ) {
+        const int x =
+            randomInt(1, MAP_W - 2);
+
+        const int y =
+            randomInt(1, MAP_H - 2);
+
+        if (!isFreeForSpecial(x, y)) {
+            continue;
+        }
+
+        setTile(x, y, type);
+        ++placed;
     }
 }
 
 static void generateWorld() {
-
-    world.clear();
-
-    world.resize(
-        MAP_W * MAP_H
+    world.assign(
+        MAP_W * MAP_H,
+        TILE_DIRT
     );
 
-    for (int y = 0; y < MAP_H; y++) {
+    revealed.assign(
+        MAP_W * MAP_H,
+        0
+    );
 
-        for (int x = 0; x < MAP_W; x++) {
+    bugs.clear();
 
-            Tile tile;
+    // --------------------------------------------------------
+    // Base terrain
+    // --------------------------------------------------------
 
-            tile.revealed = 0;
+    for (int y = 0; y < MAP_H; ++y) {
+        for (int x = 0; x < MAP_W; ++x) {
+
+            if (
+                x == 0 ||
+                y == 0 ||
+                x == MAP_W - 1 ||
+                y == MAP_H - 1
+            ) {
+                setTile(
+                    x,
+                    y,
+                    TILE_ROCK
+                );
+
+                continue;
+            }
 
             const int roll =
                 randomInt(0, 99);
 
-            if (roll < 58) {
-                tile.type = 0;
+            if (roll < 22) {
+                setTile(
+                    x,
+                    y,
+                    TILE_ROCK
+                );
             }
-            else if (roll < 82) {
-                tile.type = 1;
+            else if (roll < 31) {
+                setTile(
+                    x,
+                    y,
+                    TILE_COPPER
+                );
             }
-            else if (roll < 94) {
-                tile.type = 2;
-            }
-            else if (roll < 98) {
-                tile.type = 3;
+            else if (roll < 35) {
+                setTile(
+                    x,
+                    y,
+                    TILE_CRYSTAL
+                );
             }
             else {
-                tile.type = 4;
+                setTile(
+                    x,
+                    y,
+                    TILE_DIRT
+                );
             }
-
-            world[indexOf(x, y)] = tile;
         }
     }
 
-    // Starting area
-    const int sx = MAP_W / 2;
-    const int sy = MAP_H / 2;
+    clearSpawnArea();
 
-    for (int dy = -2; dy <= 2; dy++) {
+    // --------------------------------------------------------
+    // Exit
+    // --------------------------------------------------------
 
-        for (int dx = -2; dx <= 2; dx++) {
+    placeSpecialTiles(
+        TILE_EXIT,
+        1
+    );
 
-            const int x = sx + dx;
-            const int y = sy + dy;
+    // --------------------------------------------------------
+    // Energy cells
+    // --------------------------------------------------------
+
+    placeSpecialTiles(
+        TILE_ENERGY,
+        stageEnergyCells()
+    );
+
+    // --------------------------------------------------------
+    // Hazards
+    // --------------------------------------------------------
+
+    placeSpecialTiles(
+        TILE_HAZARD,
+        stageHazards()
+    );
+
+    // Player area always safe.
+    clearSpawnArea();
+
+    revealAround();
+
+    // Initial bugs according to difficulty.
+    const int initialBugs =
+        min(
+            currentStage,
+            maximumBugs()
+        );
+
+    for (int i = 0;
+         i < initialBugs;
+         ++i) {
+        // Spawn bugs away from player.
+        for (int attempt = 0;
+             attempt < 100;
+             ++attempt) {
+
+            const int x =
+                randomInt(2, MAP_W - 3);
+
+            const int y =
+                randomInt(2, MAP_H - 3);
+
+            const double distance =
+                std::hypot(
+                    static_cast<double>(
+                        x - player.x
+                    ),
+                    static_cast<double>(
+                        y - player.y
+                    )
+                );
+
+            if (distance < 7.0) {
+                continue;
+            }
+
+            Bug bug;
+
+            bug.x = x + 0.5;
+            bug.y = y + 0.5;
+
+            bug.speed =
+                randomDouble(
+                    bugSpeedMin(),
+                    bugSpeedMax()
+                );
+
+            bugs.push_back(bug);
+            break;
+        }
+    }
+}
+
+// ============================================================
+// REVEAL
+// ============================================================
+
+static void revealAround() {
+    const int radius = 4;
+
+    for (int y = player.y - radius;
+         y <= player.y + radius;
+         ++y) {
+
+        for (int x = player.x - radius;
+             x <= player.x + radius;
+             ++x) {
 
             if (!insideMap(x, y)) {
                 continue;
             }
 
-            Tile& tile =
-                world[indexOf(x, y)];
+            const int dx =
+                x - player.x;
 
-            tile.type = 0;
-            tile.revealed = 1;
+            const int dy =
+                y - player.y;
+
+            if (
+                dx * dx +
+                dy * dy <=
+                radius * radius
+            ) {
+                revealed[indexOf(x, y)] = 1;
+            }
         }
     }
-
-    player.x = sx;
-    player.y = sy;
 }
 
 // ============================================================
-// MINING
+// TILE INTERACTION
 // ============================================================
 
-static void mine(int x, int y) {
-
+static void mineTile(
+    int x,
+    int y
+) {
     if (!insideMap(x, y)) {
         return;
     }
 
-    Tile& tile =
-        world[indexOf(x, y)];
+    const int tile =
+        getTile(x, y);
 
-    tile.revealed = 1;
+    if (tile == TILE_ROCK) {
 
-    if (tile.type == 1) {
+        const int cost = 2;
 
-        tile.type = 0;
+        player.energy =
+            max(
+                0,
+                player.energy - cost
+            );
 
-        player.score += 1;
-        player.energy -= 2;
+        setTile(
+            x,
+            y,
+            TILE_DIRT
+        );
+
+        player.score += 2;
     }
-    else if (tile.type == 2) {
 
-        tile.type = 0;
+    else if (tile == TILE_COPPER) {
 
+        player.energy =
+            max(
+                0,
+                player.energy - 2
+            );
+
+        player.copper += 1;
         player.score += 10;
-        player.energy -= 2;
+
+        setTile(
+            x,
+            y,
+            TILE_DIRT
+        );
     }
-    else if (tile.type == 3) {
 
-        tile.type = 0;
+    else if (tile == TILE_CRYSTAL) {
 
+        player.energy =
+            max(
+                0,
+                player.energy - 2
+            );
+
+        player.crystals += 1;
         player.score += 25;
-        player.energy -= 2;
+
+        setTile(
+            x,
+            y,
+            TILE_DIRT
+        );
     }
-    else if (tile.type == 4) {
 
-        tile.type = 0;
+    else if (tile == TILE_ENERGY) {
 
-        player.score += 15;
+        // ONLY source of energy regeneration.
+        player.energy =
+            min(
+                START_ENERGY,
+                player.energy + 25
+            );
 
-        player.energy += 15;
+        player.score += 5;
 
-        if (player.energy > START_ENERGY) {
-            player.energy = START_ENERGY;
+        setTile(
+            x,
+            y,
+            TILE_DIRT
+        );
+
+        js_message(
+            "ENERGY CELL +25"
+        );
+    }
+
+    else if (tile == TILE_HAZARD) {
+
+        const int damage =
+            8 + currentStage * 2;
+
+        player.hp =
+            max(
+                0,
+                player.hp - damage
+            );
+
+        player.energy =
+            max(
+                0,
+                player.energy - 1
+            );
+
+        setTile(
+            x,
+            y,
+            TILE_DIRT
+        );
+
+        if (player.hp <= 0) {
+            gameOverNow(
+                "HP DEPLETED"
+            );
+
+            return;
         }
     }
 }
@@ -767,16 +925,29 @@ static void mine(int x, int y) {
 // PLAYER MOVEMENT
 // ============================================================
 
-static void tryMove(int dx, int dy) {
-
-    if (gameOver) {
+static void tryMove(
+    int dx,
+    int dy
+) {
+    if (!running ||
+        paused ||
+        gameOver) {
         return;
     }
 
+    // Energy zero means the run is already over.
     if (player.energy <= 0) {
-        gameOver = true;
-        js_game_state(1);
-        js_message("OUT OF ENERGY");
+        gameOverNow(
+            "ENERGY DEPLETED"
+        );
+
+        return;
+    }
+
+    if (
+        std::abs(dx) +
+        std::abs(dy) != 1
+    ) {
         return;
     }
 
@@ -790,240 +961,284 @@ static void tryMove(int dx, int dy) {
         return;
     }
 
-    Tile& target =
-        world[indexOf(nx, ny)];
+    const int target =
+        getTile(nx, ny);
 
-    // Rock blocks movement until mined
-    if (target.type == 1) {
+    // --------------------------------------------------------
+    // Rock = mine instead of move
+    // --------------------------------------------------------
 
-        mine(nx, ny);
+    if (target == TILE_ROCK) {
 
-        revealAround(
-            player.x,
-            player.y
-        );
+        mineTile(nx, ny);
+
+        if (player.energy <= 0 &&
+            !gameOver) {
+
+            gameOverNow(
+                "ENERGY DEPLETED"
+            );
+        }
 
         return;
     }
 
-    // Move
+    // --------------------------------------------------------
+    // Every movement consumes energy
+    // --------------------------------------------------------
+
+    player.energy =
+        max(
+            0,
+            player.energy - 1
+        );
+
     player.x = nx;
     player.y = ny;
 
-    player.energy--;
+    revealAround();
 
-    revealAround(
+    // --------------------------------------------------------
+    // Tile interaction
+    // --------------------------------------------------------
+
+    mineTile(
         player.x,
         player.y
     );
-
-    // Collect resource
-    if (
-        target.type == 2 ||
-        target.type == 3 ||
-        target.type == 4
-    ) {
-        mine(nx, ny);
-    }
-
-    if (player.energy <= 0) {
-
-        player.energy = 0;
-
-        gameOver = true;
-
-        js_game_state(1);
-        js_message("OUT OF ENERGY");
-    }
-}
-
-// ============================================================
-// BUGS
-// ============================================================
-
-static void spawnBug() {
-
-    if (
-        static_cast<int>(bugs.size())
-        >= MAX_BUGS
-    ) {
-        return;
-    }
-
-    Bug bug;
-
-    bool valid = false;
-
-    for (int attempt = 0; attempt < 50; attempt++) {
-
-        bug.x =
-            randomDouble(
-                2.0,
-                MAP_W - 3.0
-            );
-
-        bug.y =
-            randomDouble(
-                2.0,
-                MAP_H - 3.0
-            );
-
-        const double distance =
-            hypot(
-                bug.x - player.x,
-                bug.y - player.y
-            );
-
-        if (distance > 8.0) {
-            valid = true;
-            break;
-        }
-    }
-
-    if (!valid) {
-        return;
-    }
-
-    bug.speed =
-        randomDouble(
-            0.35,
-            0.75
-        );
-
-    bugs.push_back(bug);
-}
-
-static void updateBugs(double dt) {
 
     if (gameOver) {
         return;
     }
 
-    for (Bug& bug : bugs) {
+    // --------------------------------------------------------
+    // Exit
+    // --------------------------------------------------------
 
-        const double dx =
-            static_cast<double>(player.x)
-            - bug.x;
+    if (
+        target == TILE_EXIT
+    ) {
+        player.depth++;
 
-        const double dy =
-            static_cast<double>(player.y)
-            - bug.y;
+        player.score +=
+            50 * currentStage;
 
-        const double distance =
-            sqrt(
-                dx * dx +
-                dy * dy
+        // Small transition reward.
+        player.hp =
+            min(
+                START_HP,
+                player.hp + 10
             );
 
-        if (distance > 0.01) {
+        // IMPORTANT:
+        // No automatic energy refill.
+        // Energy remains unchanged here.
 
-            bug.x +=
-                (dx / distance)
-                * bug.speed
-                * dt;
+        js_message(
+            "DEPTH COMPLETE"
+        );
 
-            bug.y +=
-                (dy / distance)
-                * bug.speed
-                * dt;
+        generateWorld();
+
+        return;
+    }
+
+    // --------------------------------------------------------
+    // Energy zero = immediate game over
+    // --------------------------------------------------------
+
+    if (player.energy <= 0) {
+        gameOverNow(
+            "ENERGY DEPLETED"
+        );
+
+        return;
+    }
+
+    // --------------------------------------------------------
+    // HP zero
+    // --------------------------------------------------------
+
+    if (player.hp <= 0) {
+        gameOverNow(
+            "HP DEPLETED"
+        );
+    }
+}
+
+// ============================================================
+// BUG SYSTEM
+// ============================================================
+
+static void spawnBug() {
+    if (
+        static_cast<int>(bugs.size()) >=
+        maximumBugs()
+    ) {
+        return;
+    }
+
+    for (int attempt = 0;
+         attempt < 100;
+         ++attempt) {
+
+        const int x =
+            randomInt(2, MAP_W - 3);
+
+        const int y =
+            randomInt(2, MAP_H - 3);
+
+        const double distance =
+            std::hypot(
+                static_cast<double>(
+                    x - player.x
+                ),
+                static_cast<double>(
+                    y - player.y
+                )
+            );
+
+        if (distance < 8.0) {
+            continue;
         }
 
-        // Bug reached player
-        if (distance < 0.7) {
+        Bug bug;
 
-            player.energy -= 8;
+        bug.x =
+            x + 0.5;
 
-            bug.x =
-                randomDouble(
-                    2.0,
-                    MAP_W - 3.0
+        bug.y =
+            y + 0.5;
+
+        bug.speed =
+            randomDouble(
+                bugSpeedMin(),
+                bugSpeedMax()
+            );
+
+        bugs.push_back(bug);
+
+        return;
+    }
+}
+
+static void updateBugs(
+    double dt
+) {
+    if (gameOver ||
+        paused) {
+        return;
+    }
+
+    for (auto& bug : bugs) {
+
+        const double dx =
+            (player.x + 0.5) -
+            bug.x;
+
+        const double dy =
+            (player.y + 0.5) -
+            bug.y;
+
+        const double distance =
+            std::hypot(dx, dy);
+
+        if (distance > 0.001) {
+
+            const double vx =
+                dx / distance;
+
+            const double vy =
+                dy / distance;
+
+            double moveAmount =
+                bug.speed * dt;
+
+            if (moveAmount > distance) {
+                moveAmount = distance;
+            }
+
+            const double nx =
+                bug.x +
+                vx * moveAmount;
+
+            const double ny =
+                bug.y +
+                vy * moveAmount;
+
+            const int tx =
+                static_cast<int>(
+                    std::floor(nx)
                 );
 
-            bug.y =
-                randomDouble(
-                    2.0,
-                    MAP_H - 3.0
+            const int ty =
+                static_cast<int>(
+                    std::floor(ny)
                 );
 
-            if (player.energy <= 0) {
-
-                player.energy = 0;
-
-                gameOver = true;
-
-                js_game_state(1);
-                js_message("CAUGHT BY A CAVE CRAWLER");
+            if (
+                insideMap(tx, ty) &&
+                getTile(tx, ty) != TILE_ROCK
+            ) {
+                bug.x = nx;
+                bug.y = ny;
             }
         }
-    }
-}
 
-// ============================================================
-// MOUSE CONTROL
-// ============================================================
+        const double hitDistance =
+            std::hypot(
+                bug.x -
+                    (player.x + 0.5),
+                bug.y -
+                    (player.y + 0.5)
+            );
 
-static void handleMouse() {
+        if (hitDistance < 0.75) {
 
-    if (!js_mouse_down()) {
-        return;
-    }
+            const int damage =
+                3 + currentStage;
 
-    const int mouseX =
-        js_mouse_x();
+            player.hp =
+                max(
+                    0,
+                    player.hp - damage
+                );
 
-    const int mouseY =
-        js_mouse_y();
+            // Push bug away.
+            const double pushX =
+                player.x + 0.5 -
+                bug.x;
 
-    const int targetX =
-        mouseX / TILE;
+            const double pushY =
+                player.y + 0.5 -
+                bug.y;
 
-    const int targetY =
-        mouseY / TILE;
+            const double pushDistance =
+                std::max(
+                    0.001,
+                    std::hypot(
+                        pushX,
+                        pushY
+                    )
+                );
 
-    if (!insideMap(targetX, targetY)) {
-        return;
-    }
+            bug.x -=
+                (pushX / pushDistance) *
+                0.8;
 
-    const int dx =
-        targetX - player.x;
+            bug.y -=
+                (pushY / pushDistance) *
+                0.8;
 
-    const int dy =
-        targetY - player.y;
+            if (player.hp <= 0) {
 
-    if (abs(dx) + abs(dy) == 1) {
+                gameOverNow(
+                    "HP DEPLETED"
+                );
 
-        if (dx > 0) {
-            tryMove(1, 0);
+                return;
+            }
         }
-        else if (dx < 0) {
-            tryMove(-1, 0);
-        }
-        else if (dy > 0) {
-            tryMove(0, 1);
-        }
-        else if (dy < 0) {
-            tryMove(0, -1);
-        }
-    }
-}
-
-// ============================================================
-// KEYBOARD CONTROL
-// ============================================================
-
-static void handleKeyboard() {
-
-    if (js_key(0) || js_key(4)) {
-        tryMove(0, -1);
-    }
-    else if (js_key(1) || js_key(5)) {
-        tryMove(0, 1);
-    }
-    else if (js_key(2) || js_key(6)) {
-        tryMove(-1, 0);
-    }
-    else if (js_key(3) || js_key(7)) {
-        tryMove(1, 0);
     }
 }
 
@@ -1032,178 +1247,627 @@ static void handleKeyboard() {
 // ============================================================
 
 static void render() {
+    const int width =
+        MAP_W * TILE;
 
-    if (world.empty()) {
+    const int height =
+        MAP_H * TILE;
+
+    EM_ASM({
+        const canvas =
+            document.getElementById("gameCanvas");
+
+        if (!canvas) return;
+
+        const ctx =
+            canvas.getContext("2d");
+
+        const w = $0;
+        const h = $1;
+
+        if (
+            canvas.width !== w ||
+            canvas.height !== h
+        ) {
+            canvas.width = w;
+            canvas.height = h;
+        }
+
+        ctx.clearRect(
+            0,
+            0,
+            w,
+            h
+        );
+    }, width, height);
+
+    // Camera centered on player.
+    const int cameraX =
+        player.x * TILE -
+        width / 2 +
+        TILE / 2;
+
+    const int cameraY =
+        player.y * TILE -
+        height / 2 +
+        TILE / 2;
+
+    EM_ASM({
+        const canvas =
+            document.getElementById("gameCanvas");
+
+        if (!canvas) return;
+
+        const ctx =
+            canvas.getContext("2d");
+
+        const mapW = $0;
+        const mapH = $1;
+        const tileSize = $2;
+
+        const cameraX = $3;
+        const cameraY = $4;
+
+        const playerX = $5;
+        const playerY = $6;
+
+        const stage = $7;
+
+        const HEAP = HEAP32;
+
+        function tileColor(type) {
+            if (type === 0) return "#171a20";
+            if (type === 1) return "#343b46";
+            if (type === 2) return "#a56a2a";
+            if (type === 3) return "#8b5cf6";
+            if (type === 4) return "#22c55e";
+            if (type === 5) return "#38bdf8";
+            if (type === 6) return "#ef4444";
+
+            return "#171a20";
+        }
+
+        const worldPtr = $8;
+        const revealPtr = $9;
+
+        for (let y = 0; y < mapH; ++y) {
+            for (let x = 0; x < mapW; ++x) {
+
+                const idx =
+                    y * mapW + x;
+
+                const visible =
+                    HEAP[revealPtr / 4 + idx];
+
+                const px =
+                    x * tileSize -
+                    cameraX;
+
+                const py =
+                    y * tileSize -
+                    cameraY;
+
+                if (!visible) {
+                    ctx.fillStyle = "#07090c";
+
+                    ctx.fillRect(
+                        px,
+                        py,
+                        tileSize,
+                        tileSize
+                    );
+
+                    continue;
+                }
+
+                const type =
+                    HEAP[
+                        worldPtr / 4 +
+                        idx
+                    ];
+
+                ctx.fillStyle =
+                    tileColor(type);
+
+                ctx.fillRect(
+                    px,
+                    py,
+                    tileSize,
+                    tileSize
+                );
+
+                ctx.strokeStyle =
+                    "rgba(255,255,255,0.035)";
+
+                ctx.strokeRect(
+                    px,
+                    py,
+                    tileSize,
+                    tileSize
+                );
+
+                const cx =
+                    px + tileSize / 2;
+
+                const cy =
+                    py + tileSize / 2;
+
+                if (type === 2) {
+                    ctx.fillStyle =
+                        "#d28b35";
+
+                    ctx.beginPath();
+
+                    ctx.arc(
+                        cx,
+                        cy,
+                        5,
+                        0,
+                        Math.PI * 2
+                    );
+
+                    ctx.fill();
+                }
+
+                if (type === 3) {
+                    ctx.fillStyle =
+                        "#c084fc";
+
+                    ctx.beginPath();
+
+                    ctx.moveTo(
+                        cx,
+                        py + 5
+                    );
+
+                    ctx.lineTo(
+                        px + tileSize - 5,
+                        cy
+                    );
+
+                    ctx.lineTo(
+                        cx,
+                        py + tileSize - 5
+                    );
+
+                    ctx.lineTo(
+                        px + 5,
+                        cy
+                    );
+
+                    ctx.closePath();
+                    ctx.fill();
+                }
+
+                if (type === 4) {
+                    ctx.fillStyle =
+                        "#86efac";
+
+                    ctx.beginPath();
+
+                    ctx.arc(
+                        cx,
+                        cy,
+                        7,
+                        0,
+                        Math.PI * 2
+                    );
+
+                    ctx.fill();
+
+                    ctx.fillStyle =
+                        "#052e16";
+
+                    ctx.font =
+                        "bold 11px Arial";
+
+                    ctx.textAlign =
+                        "center";
+
+                    ctx.textBaseline =
+                        "middle";
+
+                    ctx.fillText(
+                        "E",
+                        cx,
+                        cy
+                    );
+                }
+
+                if (type === 5) {
+                    ctx.strokeStyle =
+                        "#7dd3fc";
+
+                    ctx.lineWidth = 3;
+
+                    ctx.strokeRect(
+                        px + 5,
+                        py + 5,
+                        tileSize - 10,
+                        tileSize - 10
+                    );
+
+                    ctx.lineWidth = 1;
+                }
+
+                if (type === 6) {
+                    ctx.fillStyle =
+                        "#fca5a5";
+
+                    ctx.beginPath();
+
+                    ctx.moveTo(
+                        cx,
+                        py + 5
+                    );
+
+                    ctx.lineTo(
+                        px + tileSize - 5,
+                        py + tileSize - 5
+                    );
+
+                    ctx.lineTo(
+                        px + 5,
+                        py + tileSize - 5
+                    );
+
+                    ctx.closePath();
+
+                    ctx.fill();
+                }
+            }
+        }
+
+        // Bugs
+        const bugPtr = $10;
+        const bugCount = $11;
+
+        for (let i = 0; i < bugCount; ++i) {
+
+            const offset =
+                bugPtr / 8 +
+                i * 3;
+
+            const bx =
+                HEAPF64[offset];
+
+            const by =
+                HEAPF64[offset + 1];
+
+            const px =
+                bx * tileSize -
+                cameraX;
+
+            const py =
+                by * tileSize -
+                cameraY;
+
+            ctx.fillStyle =
+                "#f97316";
+
+            ctx.beginPath();
+
+            ctx.arc(
+                px,
+                py,
+                8,
+                0,
+                Math.PI * 2
+            );
+
+            ctx.fill();
+
+            ctx.fillStyle =
+                "#111827";
+
+            ctx.beginPath();
+
+            ctx.arc(
+                px - 3,
+                py - 2,
+                1.5,
+                0,
+                Math.PI * 2
+            );
+
+            ctx.arc(
+                px + 3,
+                py - 2,
+                1.5,
+                0,
+                Math.PI * 2
+            );
+
+            ctx.fill();
+        }
+
+        // Player
+        const playerPX =
+            playerX * tileSize -
+            cameraX +
+            tileSize / 2;
+
+        const playerPY =
+            playerY * tileSize -
+            cameraY +
+            tileSize / 2;
+
+        ctx.fillStyle =
+            "#f8fafc";
+
+        ctx.beginPath();
+
+        ctx.arc(
+            playerPX,
+            playerPY,
+            8,
+            0,
+            Math.PI * 2
+        );
+
+        ctx.fill();
+
+        ctx.strokeStyle =
+            "#38bdf8";
+
+        ctx.lineWidth = 3;
+
+        ctx.stroke();
+
+        ctx.lineWidth = 1;
+
+        // Stage indicator
+        ctx.fillStyle =
+            "rgba(0,0,0,0.55)";
+
+        ctx.fillRect(
+            12,
+            12,
+            105,
+            30
+        );
+
+        ctx.fillStyle =
+            "#ffffff";
+
+        ctx.font =
+            "bold 14px Arial";
+
+        ctx.textAlign =
+            "left";
+
+        ctx.textBaseline =
+            "middle";
+
+        ctx.fillText(
+            "STAGE " + stage,
+            24,
+            27
+        );
+    },
+    MAP_W,
+    MAP_H,
+    TILE,
+    cameraX,
+    cameraY,
+    player.x,
+    player.y,
+    currentStage,
+    world.data(),
+    revealed.data(),
+    bugs.empty()
+        ? nullptr
+        : &bugs[0],
+    static_cast<int>(bugs.size())
+    );
+}
+
+// ============================================================
+// HUD
+// ============================================================
+
+static void updateHUD() {
+    js_update_hud(
+        player.hp,
+        player.energy,
+        player.score,
+        player.copper,
+        player.crystals,
+        player.depth,
+        currentStage,
+        runElapsed()
+    );
+}
+
+// ============================================================
+// KEY INPUT
+// ============================================================
+
+extern "C"
+EMSCRIPTEN_KEEPALIVE
+void js_key(int key) {
+
+    if (key == 'w') {
+        tryMove(0, -1);
+    }
+    else if (key == 's') {
+        tryMove(0, 1);
+    }
+    else if (key == 'a') {
+        tryMove(-1, 0);
+    }
+    else if (key == 'd') {
+        tryMove(1, 0);
+    }
+    else if (key == 'p') {
+        if (!gameOver) {
+            paused = !paused;
+
+            js_message(
+                paused
+                    ? "PAUSED"
+                    : "RESUMED"
+            );
+        }
+    }
+}
+
+// ============================================================
+// EXPORTED CONTROLS
+// ============================================================
+
+extern "C"
+EMSCRIPTEN_KEEPALIVE
+void move_player(
+    int dx,
+    int dy
+) {
+    tryMove(dx, dy);
+}
+
+extern "C"
+EMSCRIPTEN_KEEPALIVE
+void toggle_pause() {
+    if (gameOver) {
         return;
     }
 
-    js_render(
-        MAP_W,
-        MAP_H,
-        TILE,
-        static_cast<int>(
-            reinterpret_cast<uintptr_t>(
-                world.data()
-            )
-        ),
-        player.x,
-        player.y,
-        static_cast<int>(
-            bugs.size()
-        ),
-        bugs.empty()
-            ? 0
-            : static_cast<int>(
-                reinterpret_cast<uintptr_t>(
-                    bugs.data()
-                )
-            )
+    paused = !paused;
+
+    js_message(
+        paused
+            ? "PAUSED"
+            : "RESUMED"
     );
 }
 
 // ============================================================
-// GAME RESET
+// RESTART
 // ============================================================
 
-extern "C" {
-
+extern "C"
 EMSCRIPTEN_KEEPALIVE
 void restart_game() {
 
-    player.x = MAP_W / 2;
-    player.y = MAP_H / 2;
-    player.energy = START_ENERGY;
-    player.score = 0;
+    player = Player();
 
+    running = true;
+    paused = false;
     gameOver = false;
 
-    bugs.clear();
+    currentStage = 1;
 
-    lastMoveTime = 0.0;
-    lastBugSpawn = 0.0;
+    bugSpawnTimer = 0.0;
+    stageMessageTimer = 0.0;
+
+    runStartTime =
+        emscripten_get_now() / 1000.0;
+
+    lastFrameTime =
+        runStartTime;
+
+    js_hide_game_over();
 
     generateWorld();
 
-    revealAround(
-        player.x,
-        player.y
+    js_message(
+        "STAGE 1"
     );
 
-    js_game_state(0);
-    js_message("MINING");
-
-    js_set_score(
-        player.score,
-        player.energy,
-        bestScore
-    );
-
+    updateHUD();
     render();
 }
 
-}
-
 // ============================================================
-// GAME TICK
+// GAME LOOP
 // ============================================================
 
-static void tick(void* arg) {
+static void gameLoop() {
 
-    static double previousTime = 0.0;
+    if (!running) {
+        return;
+    }
 
-    const double currentTime =
+    const double now =
         emscripten_get_now() / 1000.0;
 
+    if (lastFrameTime <= 0.0) {
+        lastFrameTime = now;
+    }
+
     double dt =
-        currentTime - previousTime;
+        now - lastFrameTime;
 
-    previousTime =
-        currentTime;
+    lastFrameTime = now;
 
-    if (dt < 0.0) {
-        dt = 0.0;
-    }
+    dt = max(
+        0.0,
+        min(0.1, dt)
+    );
 
-    if (dt > 0.1) {
-        dt = 0.1;
-    }
+    if (!gameOver &&
+        !paused) {
 
-    if (!gameOver) {
+        const double elapsed =
+            now - runStartTime;
 
-        // ----------------------------------------------------
-        // Keyboard movement cooldown
-        // ----------------------------------------------------
+        const int newStage =
+            calculateStage(elapsed);
 
-        if (
-            currentTime - lastMoveTime
-            >= 0.11
-        ) {
+        if (newStage != currentStage) {
 
-            handleKeyboard();
+            currentStage = newStage;
 
-            lastMoveTime =
-                currentTime;
+            js_message(
+                (
+                    std::string("STAGE ") +
+                    std::to_string(currentStage)
+                ).c_str()
+            );
         }
 
         // ----------------------------------------------------
-        // Mouse
+        // Bug spawning becomes faster at higher stages.
         // ----------------------------------------------------
+
+        bugSpawnTimer += dt;
 
         if (
-            currentTime - lastMoveTime
-            >= 0.11
+            bugSpawnTimer >=
+            bugSpawnInterval()
         ) {
-
-            handleMouse();
-
-            lastMoveTime =
-                currentTime;
-        }
-
-        // ----------------------------------------------------
-        // Spawn bugs
-        // ----------------------------------------------------
-
-        if (
-            currentTime - lastBugSpawn
-            >= 5.0
-        ) {
+            bugSpawnTimer = 0.0;
 
             spawnBug();
-
-            lastBugSpawn =
-                currentTime;
         }
-
-        // ----------------------------------------------------
-        // Update bugs
-        // ----------------------------------------------------
 
         updateBugs(dt);
 
         // ----------------------------------------------------
-        // Best score
+        // Absolute rule:
+        // Energy 0 = Game Over.
         // ----------------------------------------------------
 
         if (
-            player.score > bestScore
+            player.energy <= 0 &&
+            !gameOver
         ) {
+            gameOverNow(
+                "ENERGY DEPLETED"
+            );
+        }
 
-            bestScore =
-                player.score;
-
-            js_save_best(
-                bestScore
+        if (
+            player.hp <= 0 &&
+            !gameOver
+        ) {
+            gameOverNow(
+                "HP DEPLETED"
             );
         }
     }
 
-    js_set_score(
-        player.score,
-        player.energy,
-        bestScore
-    );
-
+    updateHUD();
     render();
 }
 
@@ -1215,31 +1879,10 @@ int main() {
 
     js_setup();
 
-    bestScore =
-        js_load_best();
+    restart_game();
 
-    generateWorld();
-
-    revealAround(
-        player.x,
-        player.y
-    );
-
-    js_game_state(0);
-
-    js_message("MINING");
-
-    js_set_score(
-        player.score,
-        player.energy,
-        bestScore
-    );
-
-    render();
-
-    emscripten_set_main_loop_arg(
-        tick,
-        nullptr,
+    emscripten_set_main_loop(
+        gameLoop,
         0,
         1
     );
