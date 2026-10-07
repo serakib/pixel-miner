@@ -15,10 +15,7 @@ target_link_options(pixel_miner PRIVATE
     "-sASSERTIONS=0"
     "-sNO_EXIT_RUNTIME=1"
     "-sEXPORTED_RUNTIME_METHODS=['ccall','cwrap']"
-    "-sEXPORTED_FUNCTIONS=['_main','_restart_game']"
+    "-sEXPORTED_FUNCTIONS=['_main','_move_player','_toggle_pause','_restart_game','_js_key']"
     "-sENVIRONMENT=web"
     "-O3"
 )
-
--sEXPORTED_FUNCTIONS=['_main','_move_player','_toggle_pause','_restart_game','_js_key']
--sEXPORTED_RUNTIME_METHODS=['ccall','cwrap']
