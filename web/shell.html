@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+  <title>Pixel Miner — C++ WebAssembly</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main>
+    <header>
+      <div>
+        <small>C++ // WEBASSEMBLY</small>
+        <h1>⛏ PIXEL MINER</h1>
+      </div>
+      <div class="stats">
+        <span id="score">ORE 0</span>
+        <span id="energy">ENERGY 100%</span>
+        <span id="level">DEPTH 1</span>
+        <span id="best">BEST 0</span>
+      </div>
+    </header>
+
+    <section class="game-wrap">
+      <canvas id="game" width="1152" height="816"></canvas>
+      <div id="gameover">
+        <div class="panel">
+          <h2>EXPEDITION OVER</h2>
+          <p>Your energy ran out.</p>
+          <button onclick="location.reload()">RESTART</button>
+        </div>
+      </div>
+    </section>
+
+    <p id="message">Explore the mine. Break valuable tiles and watch your energy.</p>
+    <section class="help">
+      <b>Move:</b> WASD / Arrow Keys &nbsp; • &nbsp;
+      <b>Mine:</b> walk into nearby rock/ore &nbsp; • &nbsp;
+      <b>Mouse/Touch:</b> tap an adjacent tile
+    </section>
+    <footer>Original C++ + WebAssembly arcade game • No backend • Local score</footer>
+  </main>
+  {{{ SCRIPT }}}
+</body>
+</html>
