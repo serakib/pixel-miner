@@ -1,45 +1,61 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
-  <title>Pixel Miner — C++ WebAssembly</title>
-  <link rel="stylesheet" href="style.css">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+    <title>Pixel Miner</title>
+    <link rel="stylesheet" href="style.css">
+    <style>
+        * { box-sizing: border-box; }
+        html, body { margin:0; padding:0; width:100%; min-height:100%; background:#07090c; color:#f8fafc; font-family:Arial,Helvetica,sans-serif; overflow:hidden; }
+        body { display:flex; flex-direction:column; align-items:center; }
+        #gameRoot { width:100%; height:100vh; min-height:100vh; display:flex; flex-direction:column; align-items:center; position:relative; }
+        #topbar { width:min(1152px,100%); min-height:58px; display:flex; align-items:center; justify-content:space-between; gap:12px; padding:10px 14px; background:#0d1117; border-bottom:1px solid #252b35; z-index:10; }
+        #title { font-size:18px; font-weight:800; letter-spacing:1px; }
+        #controls { display:flex; align-items:center; gap:8px; }
+        button { border:1px solid #3a4350; background:#171c24; color:#f8fafc; border-radius:8px; padding:8px 13px; cursor:pointer; font-weight:700; }
+        button:hover { background:#202733; }
+        #hud { width:min(1152px,100%); display:grid; grid-template-columns:repeat(8,minmax(70px,1fr)); gap:7px; padding:8px 10px; background:#0a0d12; border-bottom:1px solid #202630; z-index:9; }
+        .hud-box { min-width:0; background:#11161e; border:1px solid #252c36; border-radius:8px; padding:6px 8px; }
+        .hud-label { color:#8993a2; font-size:10px; text-transform:uppercase; letter-spacing:.6px; }
+        .hud-value { margin-top:2px; font-size:15px; font-weight:800; }
+        .bar { height:5px; margin-top:5px; background:#252b34; border-radius:99px; overflow:hidden; }
+        .bar > div { width:100%; height:100%; transition:width .15s linear; }
+        #hpBar { background:#ef4444; } #energyBar { background:#22c55e; }
+        #gameArea { flex:1; width:100%; display:flex; align-items:center; justify-content:center; padding:10px; min-height:0; position:relative; }
+        #gameCanvas { display:block; width:min(calc(100vw - 20px),1152px); height:auto; max-height:calc(100vh - 150px); aspect-ratio:1152 / 816; background:#07090c; border:1px solid #2b323d; border-radius:8px; image-rendering:pixelated; touch-action:none; box-shadow:0 15px 50px rgba(0,0,0,.45); }
+        #message { position:fixed; left:50%; top:82px; transform:translate(-50%,-10px); padding:9px 18px; background:rgba(15,23,42,.94); border:1px solid #3b4757; border-radius:999px; font-size:13px; font-weight:800; opacity:0; pointer-events:none; transition:opacity .2s ease,transform .2s ease; z-index:50; }
+        #message.show { opacity:1; transform:translate(-50%,0); }
+        #gameOverOverlay { position:fixed; inset:0; display:flex; align-items:center; justify-content:center; background:rgba(0,0,0,.72); backdrop-filter:blur(5px); opacity:0; visibility:hidden; transition:opacity .18s ease; z-index:100; }
+        #gameOverOverlay.visible { opacity:1; visibility:visible; }
+        .game-over-card { width:min(380px,calc(100vw - 36px)); padding:30px 26px; background:#10151d; border:1px solid #343e4c; border-radius:16px; text-align:center; box-shadow:0 25px 80px rgba(0,0,0,.55); }
+        .game-over-title { font-size:30px; font-weight:900; letter-spacing:2px; }
+        .game-over-reason { margin-top:10px; color:#9ca3af; font-size:14px; font-weight:700; }
+        .game-over-score { margin-top:18px; font-size:18px; font-weight:800; }
+        #gameOverRestart { margin-top:24px; min-width:150px; padding:11px 20px; background:#2563eb; border-color:#3b82f6; }
+        #gameOverRestart:hover { background:#1d4ed8; }
+        #help { position:fixed; left:14px; bottom:12px; padding:7px 10px; background:rgba(10,13,18,.82); border:1px solid #252c36; border-radius:7px; color:#8d97a5; font-size:11px; z-index:20; pointer-events:none; }
+        @media (max-width:800px) { #hud{grid-template-columns:repeat(4,minmax(65px,1fr));} #gameCanvas{max-height:calc(100vh - 230px);} #help{display:none;} #topbar{min-height:50px;} }
+        @media (max-width:480px) { #title{font-size:14px;} #controls button{padding:7px 9px;font-size:11px;} #hud{gap:4px;padding:5px;} .hud-box{padding:5px;} .hud-label{font-size:8px;} .hud-value{font-size:12px;} #gameArea{padding:5px;} }
+    </style>
 </head>
 <body>
-  <main>
-    <header>
-      <div>
-        <small>C++ // WEBASSEMBLY</small>
-        <h1>⛏ PIXEL MINER</h1>
-      </div>
-      <div class="stats">
-        <span id="score">ORE 0</span>
-        <span id="energy">ENERGY 100%</span>
-        <span id="level">DEPTH 1</span>
-        <span id="best">BEST 0</span>
-      </div>
-    </header>
-
-    <section class="game-wrap">
-      <canvas id="game" width="1152" height="816"></canvas>
-      <div id="gameover">
-        <div class="panel">
-          <h2>EXPEDITION OVER</h2>
-          <p>Your energy ran out.</p>
-          <button onclick="location.reload()">RESTART</button>
-        </div>
-      </div>
-    </section>
-
-    <p id="message">Explore the mine. Break valuable tiles and watch your energy.</p>
-    <section class="help">
-      <b>Move:</b> WASD / Arrow Keys &nbsp; • &nbsp;
-      <b>Mine:</b> walk into nearby rock/ore &nbsp; • &nbsp;
-      <b>Mouse/Touch:</b> tap an adjacent tile
-    </section>
-    <footer>Original C++ + WebAssembly arcade game • No backend • Local score</footer>
-  </main>
-  {{{ SCRIPT }}}
+<div id="gameRoot">
+    <div id="topbar"><div id="title">PIXEL MINER</div><div id="controls"><button type="button" onclick="window.pixelMiner&&window.pixelMiner.pause&&window.pixelMiner.pause()">PAUSE</button><button type="button" onclick="window.pixelMiner&&window.pixelMiner.restart&&window.pixelMiner.restart()">RESTART</button></div></div>
+    <div id="hud">
+        <div class="hud-box"><div class="hud-label">HP</div><div id="hpValue" class="hud-value">100</div><div class="bar"><div id="hpBar"></div></div></div>
+        <div class="hud-box"><div class="hud-label">Energy</div><div id="energyValue" class="hud-value">100</div><div class="bar"><div id="energyBar"></div></div></div>
+        <div class="hud-box"><div class="hud-label">Score</div><div id="scoreValue" class="hud-value">0</div></div>
+        <div class="hud-box"><div class="hud-label">Copper</div><div id="copperValue" class="hud-value">0</div></div>
+        <div class="hud-box"><div class="hud-label">Crystal</div><div id="crystalValue" class="hud-value">0</div></div>
+        <div class="hud-box"><div class="hud-label">Depth</div><div id="depthValue" class="hud-value">1</div></div>
+        <div class="hud-box"><div class="hud-label">Stage</div><div id="stageValue" class="hud-value">1</div></div>
+        <div class="hud-box"><div class="hud-label">Time</div><div id="timeValue" class="hud-value">00:00</div></div>
+    </div>
+    <div id="gameArea"><canvas id="gameCanvas" width="1152" height="816"></canvas></div>
+</div>
+<div id="message"></div>
+<div id="help">WASD / Arrow Keys = Move &nbsp; • &nbsp; Click / Swipe = Move &nbsp; • &nbsp; P = Pause</div>
+{{{ SCRIPT }}}
 </body>
 </html>
